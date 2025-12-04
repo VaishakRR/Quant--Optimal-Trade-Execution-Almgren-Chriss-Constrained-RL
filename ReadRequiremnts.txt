@@ -1,0 +1,5 @@
+This Project was completly created by using Google colab cloud platform.
+So it is recomended to use that platform for not encountering dependency conflicts.
+
+If any problem appears please do not hesitate to contact at vaishakrr97@gmail.com
+ThankYou for considering...
