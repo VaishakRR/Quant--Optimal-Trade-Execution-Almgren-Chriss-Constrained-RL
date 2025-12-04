@@ -1,0 +1,146 @@
+# src/trainer.py
+import numpy as np
+from env_cmdp import ExecEnv
+from dataset import OfflineReplayBuffer
+from cql import CQLAgent, Actor, Critic
+import torch
+from tqdm import trange
+import os
+
+# --- gym / gymnasium compatibility wrappers -------------------------------
+def reset_env(env, seed=None):
+    """
+    Return the observation array. Works for:
+      - gym.reset() -> obs
+      - gymnasium.reset(seed=...) -> (obs, info)
+    """
+    try:
+        obs, info = env.reset(seed=seed)
+        return obs
+    except TypeError:
+        return env.reset()
+
+def step_env(env, action):
+    """
+    Normalize env.step return to (obs, reward, done, info)
+    Works for both gym (4-tuple) and gymnasium (5-tuple).
+    """
+    res = env.step(action)
+    if len(res) == 4:
+        obs, reward, done, info = res
+        return obs, reward, bool(done), info
+    elif len(res) == 5:
+        obs, reward, terminated, truncated, info = res
+        done = bool(terminated or truncated)
+        return obs, reward, done, info
+    else:
+        raise RuntimeError("Unexpected env.step() return signature")
+
+# --- synthetic dataset generation -----------------------------------------
+def generate_synthetic_episodes(env, n_eps=100, seed=0):
+    rng = np.random.default_rng(seed)
+    eps = []
+    for i in range(n_eps):
+        # try to seed env RNG if available
+        try:
+            env.seed(int(rng.integers(0, 1e9)))
+        except Exception:
+            pass
+        obs0 = reset_env(env, seed=None)
+        obs_seq = [np.array(obs0, dtype=np.float32)]
+        acts = []
+        rews = []
+        dones = []
+        for t in range(env.T):
+            # behavior policy (noisy TWAP-like)
+            remaining_frac = (env.x / env.X) if env.X > 0 else 0.0
+            p = min(env.p_max, max(-env.p_max, remaining_frac / max(1e-6, (env.T - env.t + 1))))
+            p = float(p * (1.0 + 0.2 * rng.standard_normal()))
+            action = np.array([p], dtype=np.float32)
+            next_obs, reward, done, info = step_env(env, action)
+            acts.append(action)
+            rews.append(float(reward))
+            dones.append(float(done))
+            obs_seq.append(np.array(next_obs, dtype=np.float32))
+            if done:
+                break
+        ep = {
+            'obs': np.stack(obs_seq),                    # (T+1, obs_dim)
+            'actions': np.stack(acts).squeeze(-1),       # (T,)
+            'rewards': np.array(rews, dtype=np.float32), # (T,)
+            'dones': np.array(dones, dtype=np.float32)   # (T,)
+        }
+        eps.append(ep)
+    return eps
+
+# --- evaluation ------------------------------------------------------------
+def evaluate_policy(env, agent, n=10):
+    returns = []
+    for i in range(n):
+        try:
+            env.seed(i + 1000)
+        except Exception:
+            pass
+        obs = reset_env(env, seed=None)
+        done = False
+        total = 0.0
+        while not done:
+            a = agent.act(obs.reshape(1, -1), deterministic=True)[0]
+            obs, r, done, info = step_env(env, a)
+            total += float(r)
+        returns.append(total)
+    return float(np.mean(returns))
+
+# --- main training loop ---------------------------------------------------
+def main():
+    # configure environment and dataset/training sizes
+    env = ExecEnv(X=500.0, T=30, V=800.0, seed=42)   # adjust terminal_penalty in env if needed
+    episodes = generate_synthetic_episodes(env, n_eps=300, seed=1)
+    buffer = OfflineReplayBuffer(episodes, seed=2)
+
+    obs_dim = episodes[0]['obs'].shape[1]
+    act_dim = 1
+    act_limit = env.p_max
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print('Using device:', device)
+
+    # instantiate base agent (this creates actor, critic1, critic2, critic1_targ, critic2_targ, optimizers)
+    agent = CQLAgent(obs_dim, act_dim, act_limit=act_limit, device=device,
+                     cql_alpha=1.0, cql_n_actions=6)
+
+    # If running on CPU, replace networks with smaller architectures and re-create targets + optimizers
+    if device == 'cpu':
+        # create smaller online critics
+        agent.critic1 = Critic(obs_dim, act_dim, hidden=(128, 128)).to(device)
+        agent.critic2 = Critic(obs_dim, act_dim, hidden=(128, 128)).to(device)
+        # create matching target critics
+        agent.critic1_targ = Critic(obs_dim, act_dim, hidden=(128, 128)).to(device)
+        agent.critic2_targ = Critic(obs_dim, act_dim, hidden=(128, 128)).to(device)
+        # copy weights (initialize targets from online)
+        agent.critic1_targ.load_state_dict(agent.critic1.state_dict())
+        agent.critic2_targ.load_state_dict(agent.critic2.state_dict())
+        # replace actor with a smaller one
+        agent.actor = Actor(obs_dim, act_dim, hidden=(128, 128), act_limit=act_limit).to(device)
+        # RECREATE optimizers so they reference the new parameters
+        agent.critic_opt = torch.optim.Adam(list(agent.critic1.parameters()) + list(agent.critic2.parameters()), lr=3e-4)
+        agent.actor_opt = torch.optim.Adam(agent.actor.parameters(), lr=3e-4)
+
+    n_updates = 800
+    batch_size = 64
+
+    for it in trange(n_updates):
+        obs_b, act_b, rew_b, next_obs_b, done_b = buffer.sample_batch(batch_size)
+        stats = agent.update(obs_b, act_b.reshape(batch_size, 1), rew_b, next_obs_b, done_b, lmbda_penalty=0.0)
+        if (it + 1) % 200 == 0:
+            avg_ret = evaluate_policy(env, agent, n=6)
+            print(f"it={it+1}, avg_return={avg_ret:.4f}, critic_loss={stats['critic_loss']:.4f}, cql_pen={stats['cql_penalty']:.4f}")
+            ckpt_dir = '/content/drive/MyDrive/execution_rl'
+            if os.path.exists(ckpt_dir):
+                torch.save({
+                    'actor_state_dict': agent.actor.state_dict(),
+                    'critic1_state_dict': agent.critic1.state_dict(),
+                    'critic2_state_dict': agent.critic2.state_dict(),
+                }, os.path.join(ckpt_dir, f'checkpoint_it{it+1}.pth'))
+
+if __name__ == "__main__":
+    main()
