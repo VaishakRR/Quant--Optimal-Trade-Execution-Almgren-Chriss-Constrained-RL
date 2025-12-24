@@ -31,7 +31,7 @@ The agent was trained on synthetic market data and evaluated against a standard 
 ### Execution Trajectory
 The plot below demonstrates the learned behavior. The **IQL Agent (Blue)** trades dynamically—front-loading execution when advantageous and slowing down to respect constraints—while TWAP (Red) trades linearly.
 
-![Trajectory](execution_results.png)
+![Trajectory](results/execution_results.png)
 
 *(Note: Lower cost distribution indicates reduced slippage and better execution quality.)*
 
