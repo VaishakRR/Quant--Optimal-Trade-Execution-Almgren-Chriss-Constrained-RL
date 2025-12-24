@@ -10,7 +10,6 @@ class CMDPEnv:
                  p_max=0.2, constraint_config=None):
         self.env = ExecEnv(X=X, T=T, V=V, seed=None, terminal_penalty=terminal_penalty)
         self.p_max = p_max
-        # constraint_config is dict: {'participation_mean': {'limit':0.05, 'scale':1.0}, ...}
         self.constraint_config = constraint_config or {}
         self.reset_metrics()
 
@@ -24,38 +23,29 @@ class CMDPEnv:
     def reset(self, seed=None):
         self.reset_metrics()
         obs = self.env.reset(seed=seed)
-        # handle gymnasium tuple
         if isinstance(obs, tuple):
             obs = obs[0]
         return obs
 
     def step(self, action, lambda_vec=None):
-        # action: scalar or array-like containing participation p
         p = float(np.clip(np.asarray(action).item(), -self.p_max, self.p_max))
-        # step underlying env
         res = self.env.step(np.array([p], dtype=np.float32))
         if len(res) == 4:
             obs, reward, done, info = res
         else:
             obs, reward, term, trunc, info = res
             done = bool(term or trunc)
-        # log metrics
         self.ep_actions.append(p)
         self.ep_exec.append(float(info.get('exec_vol', 0.0)))
         self.ep_costs.append(float(info.get('instant_cost', 0.0)))
         self.ep_x.append(float(info.get('remaining_inventory', getattr(self.env, 'x', 0.0))))
         self.tot_cost += float(info.get('instant_cost', 0.0))
 
-        # augment reward by Lagrangian penalties (lambda_vec is dict of multipliers)
         lagr_pen = 0.0
         if lambda_vec:
-            # example constraint transforms
-            # participation mean: g1 = mean(|p|)
-            # terminal shortfall: g2 = remaining inventory at end (will be applied in finalize)
-            # Here we add per-step approximation for participation
             part_limit = self.constraint_config.get('participation_mean', {}).get('limit', None)
             if part_limit is not None:
-                g_part = abs(p) / (part_limit + 1e-12)  # normalized
+                g_part = abs(p) / (part_limit + 1e-12)  
                 lagr_pen += lambda_vec.get('participation_mean', 0.0) * (g_part - 1.0/ (self.env.T + 0.0))
 
         shaped_reward = reward - float(lagr_pen)

@@ -1,4 +1,3 @@
-# src/env_cmdp.py (patched: final-step forced liquidation)
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -69,12 +68,10 @@ class ExecEnv(gym.Env):
         p = float(np.clip(np.asarray(action).item(), -self.p_max, self.p_max))
         V_t = self.V * (1.0 + 0.1 * self.rng.standard_normal())
 
-        # Forced liquidation on final actionable step: if next step would end episode,
-        # execute entire remaining inventory (subject to V_t cap).
+        
         last_step = (self.t >= self.T - 1)
         if last_step and self.x > 0:
-            exec_vol = self.x  # execute all remaining shares
-            # cap by available volume if you want partial fills; here we force full execution
+            exec_vol = self.x  
         else:
             exec_vol = max(0.0, p * V_t)
             exec_vol = min(exec_vol, self.x)
@@ -82,7 +79,7 @@ class ExecEnv(gym.Env):
         exec_price = self.midprice - self.eta * (exec_vol / max(1e-6, self.dt))
         proceeds = exec_vol * exec_price
 
-        # permanent impact + noise
+    
         self.midprice = (self.midprice
                          - self.gamma * (exec_vol / max(1e-6, self.dt)) * self.dt
                          + self.vol_est * np.sqrt(self.dt) * self.rng.standard_normal())
@@ -93,7 +90,6 @@ class ExecEnv(gym.Env):
         instant_cost = (self.midprice + self.gamma * (exec_vol / max(1e-6, self.dt)) * self.dt) * exec_vol - proceeds
         reward = -float(instant_cost)
 
-        # update simple estimators
         self.ofi = 0.95 * self.ofi + 0.05 * (exec_vol - (V_t - exec_vol))
         self.vol_est = 0.98 * self.vol_est + 0.02 * abs(self.midprice - exec_price) / max(1e-6, np.sqrt(self.dt))
 

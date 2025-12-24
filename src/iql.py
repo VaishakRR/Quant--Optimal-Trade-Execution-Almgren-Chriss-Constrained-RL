@@ -32,8 +32,7 @@ class TwinQ(nn.Module):
 class GaussianActor(nn.Module):
     def __init__(self, state_dim, action_dim, max_action, hidden_dim=256):
         super().__init__()
-        self.net = MLP(state_dim, hidden_dim * 2, hidden_dim) # output 2*hidden for mean/log_std? No, direct
-        # Standard separate heads approach
+        self.net = MLP(state_dim, hidden_dim * 2, hidden_dim) 
         self.l1 = nn.Linear(state_dim, hidden_dim)
         self.l2 = nn.Linear(hidden_dim, hidden_dim)
         self.mean = nn.Linear(hidden_dim, action_dim)
@@ -44,7 +43,6 @@ class GaussianActor(nn.Module):
         x = F.relu(self.l1(state))
         x = F.relu(self.l2(x))
         mean = self.mean(x)
-        # Clamp log_std for stability
         log_std = self.log_std(x).clamp(-20, 2)
         std = torch.exp(log_std)
         return mean, std
@@ -68,8 +66,8 @@ class IQLAgent:
         hidden_dim=256,
         discount=0.99,
         tau=0.005,
-        expectile=0.7,   # IQL hyperparam: usually 0.7 - 0.9
-        temperature=3.0, # AWR temperature
+        expectile=0.7,   
+        temperature=3.0, 
         lr=3e-4,
         device="cpu"
     ):
@@ -80,13 +78,12 @@ class IQLAgent:
         self.expectile = expectile
         self.temperature = temperature
 
-        # Models
         self.q_critic = TwinQ(state_dim, action_dim, hidden_dim).to(device)
         self.q_target = copy.deepcopy(self.q_critic)
         self.value_net = MLP(state_dim, 1, hidden_dim).to(device) # V function
         self.actor = GaussianActor(state_dim, action_dim, act_limit, hidden_dim).to(device)
 
-        # Optimizers
+    
         self.q_optimizer = torch.optim.Adam(self.q_critic.parameters(), lr=lr)
         self.v_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=lr)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr)
@@ -103,9 +100,7 @@ class IQLAgent:
         reward = reward.to(self.device)
         not_done = not_done.to(self.device)
 
-        # -----------------------------
-        # 1. Value Function Update (Expectile Regression)
-        # -----------------------------
+       
         with torch.no_grad():
             q1, q2 = self.q_target(state, action)
             q_min = torch.min(q1, q2)
@@ -117,9 +112,7 @@ class IQLAgent:
         v_loss.backward()
         self.v_optimizer.step()
 
-        # -----------------------------
-        # 2. Q-Function Update
-        # -----------------------------
+       
         with torch.no_grad():
             next_v = self.value_net(next_state)
             q_target_val = reward + self.discount * not_done * next_v.detach()
@@ -131,10 +124,7 @@ class IQLAgent:
         q_loss.backward()
         self.q_optimizer.step()
 
-        # -----------------------------
-        # 3. Actor Update (Advantage Weighted Regression)
-        # -----------------------------
-        # IQL extracts policy from value function info without querying Q out of distribution
+        
         with torch.no_grad():
             q1, q2 = self.q_target(state, action)
             q_val = torch.min(q1, q2)
@@ -142,19 +132,10 @@ class IQLAgent:
             advantage = q_val - v_val
             
             exp_adv = torch.exp(advantage * self.temperature)
-            exp_adv = torch.clamp(exp_adv, max=100.0) # Clip for stability
-
-        # We need log_prob of the taken action under current policy
-        # Note: In standard IQL, we maximize E[exp_adv * log_pi(a|s)]
-        # For Gaussian actor:
+            exp_adv = torch.clamp(exp_adv, max=100.0) 
         mean, std = self.actor(state)
         normal = torch.distributions.Normal(mean, std)
         
-        # We assume 'action' from buffer is what we want to clone, weighted by advantage
-        # But we need to handle the Tanh squash carefully or just assume action is within bounds
-        # For simplicity here, we treat action as raw if actor outputs raw. 
-        # But our actor outputs mean. 
-        # Standard implementation uses log_prob of the *buffer action*
         
         log_prob = normal.log_prob(action).sum(dim=-1, keepdim=True)
         actor_loss = -(exp_adv * log_prob).mean()
@@ -163,9 +144,7 @@ class IQLAgent:
         actor_loss.backward()
         self.actor_optimizer.step()
 
-        # -----------------------------
-        # 4. Polyak Averaging for Q
-        # -----------------------------
+        
         for param, target_param in zip(self.q_critic.parameters(), self.q_target.parameters()):
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 

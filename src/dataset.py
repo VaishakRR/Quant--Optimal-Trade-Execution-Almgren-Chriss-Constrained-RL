@@ -26,7 +26,6 @@ class OfflineReplayBuffer:
         self.size = min(self.size + 1, self.max_size)
 
     def sample(self, batch_size):
-        # Ensure we don't sample more than available
         real_size = self.size
         ind = np.random.randint(0, real_size, size=batch_size)
 

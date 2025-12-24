@@ -1,4 +1,4 @@
-# src/cql.py (patched: actor update includes BC regularizer)
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -103,11 +103,9 @@ class CQLAgent:
         critic_loss.backward()
         self.critic_opt.step()
 
-        # Actor update: add BC regularizer to keep policy near dataset actions
         a_pi = self.actor(obs)
         q1_pi_for_grad = self.critic1(obs, a_pi)
         actor_loss_q = -q1_pi_for_grad.mean()
-        # BC regularization: use current batch actions as behavior targets
         bc_loss = self.mse_loss(a_pi, act)
         actor_loss = actor_loss_q + self.bc_coef * bc_loss
 

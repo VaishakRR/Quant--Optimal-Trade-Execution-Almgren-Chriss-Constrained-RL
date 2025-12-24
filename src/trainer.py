@@ -8,12 +8,12 @@ import copy
 class CMDP_IQL_Trainer:
     def __init__(
         self,
-        env,              # CMDPEnv instance (for evaluation/constraints)
-        agent,            # IQLAgent instance
-        buffer,           # OfflineReplayBuffer instance
+        env,              
+        agent,            
+        buffer,           
         batch_size=256,
-        lambda_lr=0.05,   # Learning rate for dual (lambda) variables
-        lambda_max=100.0, # Clip lambdas
+        lambda_lr=0.05,   
+        lambda_max=100.0, 
         device="cpu"
     ):
         self.env = env
@@ -22,12 +22,10 @@ class CMDP_IQL_Trainer:
         self.batch_size = batch_size
         self.device = device
         
-        # Dual Variables (Lagrangian Multipliers)
         self.lambda_vec = {k: 0.0 for k in self.env.constraint_config.keys()}
         self.lambda_lr = lambda_lr
         self.lambda_max = lambda_max
 
-        # Logging
         self.logs = defaultdict(list)
 
     def compute_batch_penalties(self, actions):
@@ -35,17 +33,13 @@ class CMDP_IQL_Trainer:
         Approximate constraint costs for a batch of actions to shape rewards.
         Ensure output shape is [batch_size, 1] to match rewards.
         """
-        # actions: tensor [batch, 1]
-        # Initialize penalties with same shape as actions [batch, 1]
+       
         penalties = torch.zeros_like(actions)
         
-        # 1. Participation Constraint: mean(|p|) <= limit
         if 'participation_mean' in self.env.constraint_config:
             limit = self.env.constraint_config['participation_mean']['limit']
             lam = self.lambda_vec.get('participation_mean', 0.0)
             if lam > 0:
-                # Cost = lambda * (|p|/limit) scaled per step
-                # strictly keep dimensions [batch, 1]
                 g_proxy = torch.abs(actions) / (limit + 1e-6)
                 penalties += lam * g_proxy / self.env.env.T 
         
@@ -131,28 +125,22 @@ class CMDP_IQL_Trainer:
             s, a, ns, r, d = self.buffer.sample(self.batch_size)
             s, a, ns, r, d = s.to(self.device), a.to(self.device), ns.to(self.device), r.to(self.device), d.to(self.device)
 
-            # --- Fix: Ensure penalties match reward shape [Batch, 1] ---
             with torch.no_grad():
                 penalties = self.compute_batch_penalties(a)
-                # Ensure penalties is [256, 1]
                 if penalties.ndim == 1: penalties = penalties.unsqueeze(-1)
                 
-                # Now the subtraction is safe: [256, 1] - [256, 1]
                 r_shaped = r - penalties
             
-            # --- IQL LOGIC ---
             with torch.no_grad():
                 q1, q2 = self.agent.q_target(s, a)
                 q_min = torch.min(q1, q2)
             
-            # Value update
             v_pred = self.agent.value_net(s)
             v_loss = self.agent.expectile_loss(q_min - v_pred).mean()
             self.agent.v_optimizer.zero_grad()
             v_loss.backward()
             self.agent.v_optimizer.step()
 
-            # Q update (using SHAPED reward)
             with torch.no_grad():
                 next_v = self.agent.value_net(ns)
                 q_target_val = r_shaped + self.agent.discount * d * next_v.detach()
@@ -163,7 +151,6 @@ class CMDP_IQL_Trainer:
             q_loss.backward()
             self.agent.q_optimizer.step()
 
-            # Actor update
             with torch.no_grad():
                 q1, q2 = self.agent.q_target(s, a)
                 q_val = torch.min(q1, q2)
@@ -183,7 +170,6 @@ class CMDP_IQL_Trainer:
             for param, target_param in zip(self.agent.q_critic.parameters(), self.agent.q_target.parameters()):
                 target_param.data.copy_(self.agent.tau * param.data + (1 - self.agent.tau) * target_param.data)
             
-            # --- Logging & Updates ---
             if (i+1) % update_duals_every == 0:
                 constraints, exec_vol = self.evaluate_policy()
                 self.update_duals(constraints)
